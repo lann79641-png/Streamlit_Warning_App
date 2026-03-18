@@ -3,90 +3,96 @@ import pandas as pd
 import numpy as np
 import pickle
 import re
-from sklearn.impute import SimpleImputer
+
+# Cấu hình trang
+st.set_page_config(page_title="Dự báo Cảnh báo học vụ", layout="wide")
 
 # =========================================================
-# 1. LOAD MODEL & TOOLS
+# 1. LOAD ASSETS
 # =========================================================
-@st.cache_resource # Dùng cache để app load nhanh hơn mỗi khi refresh
+@st.cache_resource
 def load_assets():
     with open('all_tools.pkl', 'rb') as f:
-        data = pickle.load(f)
-    return data
+        return pickle.load(f)
 
-try:
-    data = load_assets()
-    model = data['model']
-    tfidf = data['tfidf']
-    svd = data['svd']
-    num_cols = data['num_cols']
-    
-    # TỰ KHỞI TẠO IMPUTER MỚI (Để tránh lỗi phiên bản scikit-learn)
-    # Chúng ta dùng chiến lược điền giá trị 0 hoặc median giả định
-    imputer = SimpleImputer(strategy="constant", fill_value=0) 
-except Exception as e:
-    st.error(f"Lỗi load model: {e}")
-    st.stop()
+data = load_assets()
+model, tfidf, svd, num_cols = data['model'], data['tfidf'], data['svd'], data['num_cols']
+
+# Hàm làm sạch văn bản
+def clean_text(text):
+    text = str(text).lower()
+    tokens = re.findall(r'[a-z0-9áàảãạăắằặẳẵâấầẩẫậđéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵ]+', text)
+    return " ".join(tokens)
 
 # =========================================================
-# 2. GIAO DIỆN APP
+# 2. GIAO DIỆN CHÍNH
 # =========================================================
-st.set_page_config(page_title="Dự đoán Học vụ BAV", layout="centered")
+st.title("🎓 Hệ thống Cảnh báo học vụ - BAV ITDE")
+st.info("Hướng dẫn: Bạn có thể nhập lẻ từng sinh viên hoặc Upload file CSV (như file test) để dự đoán hàng loạt.")
 
-st.title("🎓 Hệ thống Cảnh báo học vụ (Demo)")
-st.markdown("---")
+tab1, tab2 = st.tabs(["📊 Dự đoán hàng loạt (Upload CSV)", "🔍 Dự đoán đơn lẻ"])
 
-# Cột bên trái: Nhập ghi chú văn bản
-st.subheader("📝 Nhập Ghi chú của Cố vấn")
-advisor_notes = st.text_area("Advisor Notes:", "Sinh viên vắng nhiều buổi, kết quả kiểm tra thấp.", height=150)
+# ---------------------------------------------------------
+# TAB 1: DỰ ĐOÁN HÀNG LOẠT (KHUYÊN DÙNG ĐỂ DEMO)
+# ---------------------------------------------------------
+with tab1:
+    uploaded_file = st.file_uploader("Kéo thả file test.csv vào đây", type=["csv"])
+    if uploaded_file:
+        df_input = pd.read_csv(uploaded_file)
+        st.write("Dữ liệu đã nhận:", df_input.head(5))
+        
+        if st.button("🚀 Chạy dự đoán toàn bộ"):
+            # Tiền xử lý Text
+            texts = df_input["Advisor_Notes"].apply(clean_text)
+            x_text = svd.transform(tfidf.transform(texts))
+            
+            # Tiền xử lý Số (Điền 0 cho các ô trống)
+            x_num = df_input[num_cols].fillna(0).values
+            
+            # Dự đoán
+            final_x = np.hstack([x_num, x_text])
+            preds = model.predict(final_x)
+            
+            # Hiển thị kết quả
+            target_map = {0: "Normal", 1: "Warning", 2: "Dropout"}
+            df_input["Prediction"] = [target_map.get(int(p), "Unknown") for p in preds.flatten()]
+            
+            st.success("Đã dự đoán xong!")
+            st.dataframe(df_input[["Student_ID", "Advisor_Notes", "Prediction"]], use_container_width=True)
+            
+            # Biểu đồ thống kê
+            st.subheader("Thống kê kết quả")
+            st.bar_chart(df_input["Prediction"].value_counts())
 
-# Cột bên dưới: Nhập các chỉ số số học
-st.subheader("📊 Chỉ số học tập (Numeric Features)")
-col1, col2 = st.columns(2)
-
-input_dict = {}
-for i, col in enumerate(num_cols):
-    # Chia làm 2 cột cho đẹp giao diện
-    with col1 if i % 2 == 0 else col2:
-        input_dict[col] = st.number_input(f"{col}", value=0.0)
-
-# =========================================================
-# 3. XỬ LÝ DỰ ĐOÁN
-# =========================================================
-if st.button("🚀 KIỂM TRA NGAY", use_container_width=True):
-    
-    # --- Bước A: Xử lý Text ---
-    def clean_text(text):
-        text = str(text).lower()
-        tokens = re.findall(r'[a-z0-9áàảãạăắằặẳẵâấầẩẫậđéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵ]+', text)
-        return " ".join(tokens)
-    
-    cleaned_notes = clean_text(advisor_notes)
-    text_tfidf = tfidf.transform([cleaned_notes])
-    text_svd = svd.transform(text_tfidf)
-
-    # --- Bước B: Xử lý Số ---
-    num_df = pd.DataFrame([input_dict])
-    # Ép kiểu về float để tránh lỗi dtype
-    num_arr = num_df.values.astype(np.float64)
-    # Vì imputer mới chưa được fit, ta sẽ xử lý thủ công điền Na bằng 0 nếu có
-    num_imputed = np.nan_to_num(num_arr, nan=0.0)
-
-    # --- Bước C: Kết hợp & Dự đoán ---
-    final_input = np.hstack([num_imputed, text_svd])
-    prediction = model.predict(final_input)
-    
-    # Map kết quả (Dựa trên nhãn trong Kaggle của bạn)
-    target_map = {0: "Bình thường (Normal)", 1: "Cảnh báo (Warning)", 2: "Nghỉ học (Dropout)"}
-    res_label = target_map.get(int(prediction[0]), "Không xác định")
-
-    # --- Hiển thị kết quả ---
-    st.markdown("---")
-    if int(prediction[0]) == 0:
-        st.success(f"### TRẠNG THÁI: {res_label}")
-    elif int(prediction[0]) == 1:
-        st.warning(f"### TRẠNG THÁI: {res_label}")
-    else:
-        st.error(f"### TRẠNG THÁI: {res_label}")
-
-st.markdown("<br><center><small>Powered by Gemini & Streamlit Cloud</small></center>", unsafe_content_html=True)
+# ---------------------------------------------------------
+# TAB 2: DỰ ĐOÁN ĐƠN LẺ (SỬA LỖI VÀ LÀM ĐẸP)
+# ---------------------------------------------------------
+with tab2:
+    with st.form("single_predict"):
+        st.subheader("Thông tin sinh viên")
+        notes = st.text_area("Ghi chú của cố vấn (Advisor Notes)", "Sinh viên nghỉ học quá 20%")
+        
+        cols = st.columns(3)
+        input_data = {}
+        for i, col_name in enumerate(num_cols):
+            with cols[i % 3]:
+                # Tự động lấy giá trị trung bình mẫu để người dùng dễ test
+                input_data[col_name] = st.number_input(f"{col_name}", value=0.0)
+        
+        submit = st.form_submit_button("Kiểm tra")
+        
+        if submit:
+            # Xử lý text
+            txt_feat = svd.transform(tfidf.transform([clean_text(notes)]))
+            # Xử lý số
+            num_feat = np.array([[input_data[c] for c in num_cols]])
+            
+            # Predict
+            final_feat = np.hstack([num_feat, txt_feat])
+            p = model.predict(final_feat)
+            
+            # Fix lỗi TypeError bằng cách ép kiểu chắc chắn về int
+            res_idx = int(np.array(p).flatten()[0])
+            
+            target_map = {0: "Bình thường (Normal)", 1: "Cảnh báo (Warning)", 2: "Nghỉ học (Dropout)"}
+            st.metric("Kết quả dự đoán:", target_map.get(res_idx, "Không xác định"))
